@@ -4,9 +4,10 @@ import cats.effect.concurrent.Ref
 import cats.effect.{ContextShift, Fiber, IO, Timer}
 import cats.implicits._
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
-
 import scala.concurrent.duration.{FiniteDuration, _}
 import scala.util.{Failure, Success, Try}
+
+import io.github.mkotsur.artc.ActiveReadThroughCache._
 
 object ActiveReadThroughCache {
 
@@ -40,8 +41,6 @@ object ActiveReadThroughCache {
         fetchValue
       )
 }
-
-import io.github.mkotsur.artc.ActiveReadThroughCache._
 
 final class ActiveReadThroughCache[T] private (
   valueRef: Ref[IO, Try[Option[T]]],

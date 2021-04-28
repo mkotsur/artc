@@ -1,14 +1,15 @@
 package io.github.mkotsur.artc
 
 import cats.effect.concurrent.{Deferred, Ref, TryableDeferred}
-import cats.effect.{ContextShift, Fiber, IO, Timer}
+import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import io.github.mkotsur.artc.Cache._
+import io.github.mkotsur.artc.State.{Init, Syncing, Value}
+import io.github.mkotsur.artc.SyncRate.backoffInterval
 import io.github.mkotsur.artc.config.ColdReadPolicy
-import io.github.mkotsur.artc.config.ColdReadPolicy.{Blocking, ReadThrough}
 
-import scala.concurrent.duration.{FiniteDuration, _}
+import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
 
 object Cache {
@@ -16,92 +17,81 @@ object Cache {
   private val logger = Slf4jLogger.getLogger[IO]
 
   object Settings {}
-  case class Settings(ceilingInterval: FiniteDuration,
-                      coldReadPolicy: ColdReadPolicy)
-
-  object SyncRound {
-    val first: SyncRound = SyncRound(0)
-  }
-
-  case class SyncRound private (value: Int) {
-    def next: SyncRound = copy(value = value + 1)
-  }
+  case class Settings(ceilingInterval: FiniteDuration, coldReadPolicy: ColdReadPolicy)
 
   /**
-    * The value the cache will be initialized with
+    * Creates an instance of [[Cache]]
     */
-  def create[T](settings: Settings, fetchValue: IO[T])(
-    implicit cs: ContextShift[IO]
-  ): IO[Cache[T]] =
+  def create[T](settings: Settings, fetchValue: IO[T])(implicit
+    cs: ContextShift[IO],
+    timer: Timer[IO]
+  ): Resource[IO, Cache[T]] = {
+
+    def cacheUpdateIO(stateRef: Ref[IO, State[T]]): IO[Unit] =
+      for {
+        _ <- logger.debug("Cache update started")
+        state <- stateRef.get
+        _ <- state match {
+          case Init(updateDeferred: TryableDeferred[IO, Try[T]]) =>
+            for {
+              _ <- stateRef.set(Syncing(SyncRound.zero, 0, None, updateDeferred))
+              valueEither <- fetchValue.attempt
+              _ <- updateDeferred.complete(valueEither.toTry)
+              _ <- stateRef.update(_ => Value(SyncRound.zero, valueEither.toTry))
+              _ <- timer.sleep(backoffInterval(settings)(SyncRound.zero)) *> cacheUpdateIO(stateRef)
+            } yield ()
+          case Value(round, _) =>
+            for {
+              updateDeferred <- Deferred.tryable[IO, Try[T]]
+              _ <- stateRef.set(Syncing[T](round.next, 0, None, updateDeferred))
+              valueEither <- fetchValue.attempt
+              _ <- updateDeferred.complete(valueEither.toTry)
+              _ <- stateRef.update(_ => Value(round.next, valueEither.toTry))
+              _ <- timer.sleep(backoffInterval(settings)(round.next)) *> cacheUpdateIO(stateRef)
+            } yield ()
+          case _: Syncing[T] =>
+            logger.debug("Skipping a new update, because there is one in progress...")
+        }
+      } yield ()
+
     for {
-      deferred <- Deferred.tryable[IO, Try[T]]
-      sharesRef <- Ref.of[IO, TryableDeferred[IO, Try[T]]](deferred)
-      syncRoundRef <- Ref.of[IO, SyncRound](SyncRound.first)
-      _ <- logger.debug(s"Successfully configured Cache")
-    } yield new Cache(sharesRef, syncRoundRef, settings, fetchValue)
-}
-
-final class Cache[T] private (valueRef: Ref[IO, TryableDeferred[IO, Try[T]]],
-                              currentAttemptRef: Ref[IO, SyncRound],
-                              settings: Settings,
-                              fetch: IO[T])(implicit cs: ContextShift[IO]) {
-
-  private def backoffInterval(a: SyncRound) =
-    math
-      .min(math.pow(2, a.value).toLong, settings.ceilingInterval.toSeconds)
-      .seconds
-
-  private def updateOnce(): IO[Unit] =
-    logger.debug("Starting a new update") >> fetch.attempt.flatMap {
-      fetchResult =>
-        for {
-          newDef <- Deferred.tryable[IO, Try[T]]
-          oldDef <- valueRef.get
-          _ <- oldDef.complete(fetchResult.toTry)
-          _ <- valueRef.set(newDef)
-        } yield ()
-    } >> logger.debug("Update complete")
-
-  def latest: IO[Option[T]] = {
-    logger.debug(
-      s"Providing the latest element with ${settings.coldReadPolicy}"
-    ) >>
-      (settings.coldReadPolicy match {
-        case Blocking =>
-          for {
-            dd <- valueRef.get
-            _ <- logger.debug(s"Old value: $dd")
-            resultTry <- dd.get
-            result <- IO.fromTry(resultTry)
-          } yield result.some
-        case ReadThrough =>
-          for {
-            dd <- valueRef.get
-            resultOptTry <- dd.tryGet
-            result <- resultOptTry match {
-              case Some(resultTry) => IO.fromTry(resultTry).map(_.some)
-              case None            => Option.empty[T].pure[IO]
-            }
-          } yield result
-      })
-
+      updateDeferred <- Resource.liftF(Deferred.tryable[IO, Try[T]])
+      initState = Init(updateDeferred)
+      initStateRef <- Resource.liftF(Ref.of[IO, State[T]](initState))
+      _ <- Resource.make(cacheUpdateIO(initStateRef).start)(fiber => fiber.cancel)
+    } yield new Cache(initStateRef, settings, fetchValue)
   }
 
-  def reset(): IO[Unit] =
-    for {
-      _ <- logger.debug(s"Reset refresh interval and update at once")
-      _ <- currentAttemptRef.set(SyncRound.first)
-      _ <- updateOnce()
-    } yield ()
+}
 
-  def scheduleUpdates(implicit timer: Timer[IO]): IO[Fiber[IO, Unit]] =
-    (for {
-      _ <- updateOnce()
-      _ <- currentAttemptRef.update(_.next)
-      nextAttempt <- currentAttemptRef.get
-      _ <- logger.debug(
-        s"Scheduling new shares update in ${backoffInterval(nextAttempt)}"
-      )
-      _ <- timer.sleep(backoffInterval(nextAttempt)) *> scheduleUpdates
-    } yield ()).start
+final class Cache[T] private (stateRef: Ref[IO, State[T]], settings: Settings, fetch: IO[T])(
+  implicit cs: ContextShift[IO]
+) {
+
+  def latest: IO[Option[T]] =
+    stateRef.get.flatMap {
+      case Init(firstValDeferred) =>
+        logger.debug("Accessing cache while in Init state") >> (settings.coldReadPolicy match {
+          case ColdReadPolicy.Reactive => None.pure[IO]
+          case ColdReadPolicy.Blocking(_) =>
+            firstValDeferred.get.flatMap(
+              t => IO.fromEither(t.map(_.some).toEither.left.map(ReadSourceFailure))
+            )
+        })
+      case Syncing(round, skips, None, next) =>
+        (settings.coldReadPolicy match {
+          case ColdReadPolicy.Reactive => None.pure[IO]
+          case ColdReadPolicy.Blocking(_) =>
+            next.get
+              .flatMap(t => IO.fromEither(t.toEither.left.map(ReadSourceFailure)))
+              .map(_.some)
+        })
+      case Syncing(round, skips, Some(current), next) =>
+        (settings.coldReadPolicy match {
+          case ColdReadPolicy.Reactive    => IO.fromTry(current.v).map(_.some)
+          case ColdReadPolicy.Blocking(_) => next.get.map(_.toOption)
+        })
+      case Value(_, v) => IO.fromEither(v.toEither.left.map(ReadSourceFailure)).map(_.some)
+    }
+
 }

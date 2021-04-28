@@ -2,103 +2,128 @@ package io.github.mkotsur.artc
 
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
-import org.scalatest.matchers.should.Matchers
-
-import scala.concurrent.duration._
-import scala.language.postfixOps
 import cats.implicits._
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import io.github.mkotsur.artc.config.ColdReadPolicy
+import org.scalatest.funspec.AsyncFunSpec
+import org.scalatest.matchers.should.Matchers
 
 import scala.collection._
 import scala.concurrent.Promise
+import scala.concurrent.duration._
+import scala.language.postfixOps
 
-class CacheTest extends AsyncIOSpec with Matchers {
+class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
   private val logger = Slf4jLogger.getLogger[IO]
 
-  "ART cache" - {
-    "(With blocking cold read policy)" - {
-      "blocks and returns the value" in {
+  describe("ART cache") {
+    describe("(With blocking cold read policy)") {
+      it("blocks and returns the first value") {
         val settings =
-          Cache.Settings(100 millis, ColdReadPolicy.Blocking)
-        val readSource = logger.debug("Source accessed") >> IO.sleep(1 second) >> IO
-          .pure(42)
+          Cache.Settings(100 millis, ColdReadPolicy.Blocking(1 second))
+        val readSource = IO.sleep(1 second) >> IO.pure(42)
 
-        (for {
-          cache <- Cache.create(settings, readSource)
-          _ <- cache.scheduleUpdates
-          latest <- cache.latest
-        } yield latest)
+        Cache
+          .create(settings, readSource)
+          .use(_.latest)
           .asserting(_ shouldBe 42.some)
+      }
+
+      it("returns the available value") {
+        val settings =
+          Cache.Settings(100 millis, ColdReadPolicy.Blocking(1 second))
+
+        val source = mutable.Queue.newBuilder.addOne(42).result()
+        // Returns: 1, ... ZzzzzzZZZzzzZZZZZzzzzz
+        val fetchValue = IO(source.dequeue()).handleErrorWith(_ => IO.sleep(1 minute))
+
+        Cache
+          .create(settings, fetchValue)
+          .use(_.latest)
+          .asserting(_ shouldBe 42.some)
+      }
+
+      it("returns a failure when the first update is awaited and has a cached failed value") {
+        val fetchValue = IO.sleep(300 millis) >> IO.raiseError[Int](new RuntimeException("Oops"))
+        val settings =
+          Cache.Settings(100 millis, ColdReadPolicy.Blocking(1 second))
+
+        Cache
+          .create(settings, fetchValue)
+          .use { _.latest }
+          .assertThrows[ReadSourceFailure]
       }
     }
 
-    "(with read through cold read policy)" - {
+    it("returns a failure when the first update has a cached failed value") {
+      val fetchValue = IO.raiseError[Int](new RuntimeException("Oops"))
       val settings =
-        Cache.Settings(100 millis, ColdReadPolicy.ReadThrough)
-      "returns the zero element when no updates have been done" in {
+        Cache.Settings(100 millis, ColdReadPolicy.Blocking(1 second))
+
+      Cache
+        .create(settings, fetchValue)
+        .use { cache =>
+          IO.sleep(300 millis) >> cache.latest
+        }
+        .assertThrows[ReadSourceFailure]
+    }
+
+    describe("(With reactive cold read policy)") {
+      val settings =
+        Cache.Settings(100 millis, ColdReadPolicy.Reactive)
+
+      it("returns the zero element when no updates have been done") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)
 
         Cache
           .create(settings, readSource)
-          .flatMap(_.latest)
+          .use(_.latest)
           .asserting(_ shouldBe None)
       }
 
-      "blocks until the data is available" in {
-        val readSource = IO.sleep(1 second) >> IO.pure(42)
-
-        Cache
-          .create(settings, readSource)
-          .flatMap(_.latest)
-          .asserting(_ shouldBe None)
-      }
-      "returns constant element when an update should have been done" in {
+      it("returns constant element when an update should have been done") {
         val readSource = IO.pure(42)
 
-        (for {
-          cache <- Cache.create(settings, readSource)
-          updatesFiber <- cache.scheduleUpdates
-          _ <- IO.sleep(100 millis)
-          res <- cache.latest
-          _ <- updatesFiber.cancel
-        } yield res).asserting(_ shouldBe Some(42))
+        Cache
+          .create(settings, readSource)
+          .use { cache =>
+            IO.sleep(150 millis) >> cache.latest
+          }
+          .asserting(_ shouldBe Some(42))
+
       }
 
-      "returns fresh elements" in {
-        val q = mutable.Queue.from(Range(1, 3))
-        val readSource = IO(q.dequeue()).recover { _ =>
-          4
-        }
+      it("returns fresh elements") {
+        val source = mutable.Queue.from(Range(1, 3))
+        // Returns: 1, 2, 3, 4, 4, ...
+        val fetchValue = IO(source.dequeue()).recover(_ => 4)
 
-        (for {
-          cache <- Cache.create(settings, readSource)
-          updatesFiber <- cache.scheduleUpdates
-          _ <- IO.sleep(300 millis)
-          res <- cache.latest
-          _ <- updatesFiber.cancel
-        } yield res).asserting(_.get should be >= 2)
+        Cache
+          .create(settings, fetchValue)
+          .use { cache =>
+            IO.sleep(300 millis) >> cache.latest
+          }
+          .asserting(_.get should be >= 2)
       }
 
-      "returns a failure when the first update action fails" in {
+      it("returns a failure when the first update action fails") {
         val error = new RuntimeException("Oops")
-        val readSource = IO.raiseError[Int](error)
+        val fetchValue = IO.raiseError[Int](error)
 
-        (for {
-          cache <- Cache.create(settings, readSource)
-          updatesFiber <- cache.scheduleUpdates
-          _ <- IO.sleep(300 millis)
-          res <- cache.latest
-          _ <- updatesFiber.cancel
-        } yield res).assertThrows[ReadSourceFailure]
+        Cache
+          .create(settings, fetchValue)
+          .use { cache =>
+            IO.sleep(300 millis) >> cache.latest
+          }
+          .assertThrows[ReadSourceFailure]
       }
 
-      "returns a failure when a subsequent update action fails" in {
+      it("returns a failure when a subsequent update action fails") {
         val error = new RuntimeException("Oops")
         val successRead = Promise[Unit]
         val failureRead = Promise[Unit]
-        val readSource = IO {
+        val fetchValue = IO {
           if (successRead.isCompleted) {
             failureRead.success(())
             throw error
@@ -107,16 +132,20 @@ class CacheTest extends AsyncIOSpec with Matchers {
             42
           }
         }
-        (for {
-          cache <- Cache.create(settings, readSource)
-          updatesFiber <- cache.scheduleUpdates
-          _ <- IO.sleep(300 millis)
-          _ <- cache.latest.asserting(_ shouldEqual 42.some)
-          _ <- IO.fromFuture(IO(failureRead.future))
-          _ <- updatesFiber.cancel
-          _ <- IO.sleep(300 millis)
-          v2 <- cache.latest
-        } yield v2).assertThrows[ReadSourceFailure]
+
+        Cache
+          .create(settings, fetchValue)
+          .use { cache =>
+            for {
+              _ <- IO.sleep(300 millis)
+              _ <- cache.latest.asserting(_ shouldEqual 42.some)
+              _ <- IO.fromFuture(IO(failureRead.future))
+              _ <- IO.sleep(300 millis)
+              v2 <- cache.latest
+            } yield v2
+
+          }
+          .assertThrows[ReadSourceFailure]
       }
     }
   }

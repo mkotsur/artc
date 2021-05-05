@@ -10,7 +10,7 @@ import io.github.mkotsur.artc.SyncRate.backoffInterval
 import io.github.mkotsur.artc.config.ColdReadPolicy
 
 import scala.concurrent.duration.FiniteDuration
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 object Cache {
 
@@ -33,22 +33,38 @@ object Cache {
         state <- stateRef.get
         _ <- state match {
           case Init(updateDeferred: TryableDeferred[IO, Try[T]]) =>
-            for {
-              _ <- stateRef.set(Syncing(SyncRound.zero, 0, None, updateDeferred))
-              valueEither <- fetchValue.attempt
-              _ <- updateDeferred.complete(valueEither.toTry)
-              _ <- stateRef.update(_ => Value(SyncRound.zero, valueEither.toTry))
-              _ <- timer.sleep(backoffInterval(settings)(SyncRound.zero)) *> cacheUpdateIO(stateRef)
-            } yield ()
-          case Value(round, _) =>
-            for {
-              updateDeferred <- Deferred.tryable[IO, Try[T]]
-              _ <- stateRef.set(Syncing[T](round.next, 0, None, updateDeferred))
-              valueEither <- fetchValue.attempt
-              _ <- updateDeferred.complete(valueEither.toTry)
-              _ <- stateRef.update(_ => Value(round.next, valueEither.toTry))
-              _ <- timer.sleep(backoffInterval(settings)(round.next)) *> cacheUpdateIO(stateRef)
-            } yield ()
+            logger.debug("... from Init state") *>
+              (for {
+                _ <- stateRef.set(Syncing(SyncRound.zero, 0, None, updateDeferred))
+                valueEither <- fetchValue.attempt
+                _ <- updateDeferred.complete(valueEither.toTry)
+                _ <- stateRef.update(_ => Value(SyncRound.zero, valueEither.toTry))
+                _ <-
+                  timer.sleep(backoffInterval(settings)(SyncRound.zero)) *> cacheUpdateIO(stateRef)
+              } yield ())
+          case v @ Value(round, storedValue: Try[T]) =>
+            logger.debug("... from Value state") *>
+              (for {
+                updateDeferred <- Deferred.tryable[IO, Try[T]]
+                _ <- stateRef.set(
+                  Syncing[T](round.next, 0, Value(round, storedValue).some, updateDeferred)
+                )
+                fetchedValueEither <- fetchValue.attempt
+                _ <- updateDeferred.complete(fetchedValueEither.toTry)
+                _ <- logger.debug("Preparing to set new value")
+                _ <- stateRef.update(
+                  _ =>
+                    Value(
+                      round.next,
+                      (fetchedValueEither.toTry, storedValue) match {
+                        case (Failure(_), Success(_)) => storedValue
+                        case _                        => fetchedValueEither.toTry
+                      }
+                    )
+                )
+                _ <- logger.debug("Set new value")
+                _ <- timer.sleep(backoffInterval(settings)(round.next)) *> cacheUpdateIO(stateRef)
+              } yield ())
           case _: Syncing[T] =>
             logger.debug("Skipping a new update, because there is one in progress...")
         }
@@ -79,18 +95,20 @@ final class Cache[T] private (stateRef: Ref[IO, State[T]], settings: Settings, f
             )
         })
       case Syncing(round, skips, None, next) =>
-        (settings.coldReadPolicy match {
-          case ColdReadPolicy.Reactive => None.pure[IO]
-          case ColdReadPolicy.Blocking(_) =>
-            next.get
-              .flatMap(t => IO.fromEither(t.toEither.left.map(ReadSourceFailure)))
-              .map(_.some)
-        })
+        logger.debug("Accessing cache while in Syncing(None) state") >>
+          (settings.coldReadPolicy match {
+            case ColdReadPolicy.Reactive => None.pure[IO]
+            case ColdReadPolicy.Blocking(_) =>
+              next.get
+                .flatMap(t => IO.fromEither(t.toEither.left.map(ReadSourceFailure)))
+                .map(_.some)
+          })
       case Syncing(round, skips, Some(current), next) =>
-        (settings.coldReadPolicy match {
-          case ColdReadPolicy.Reactive    => IO.fromTry(current.v).map(_.some)
-          case ColdReadPolicy.Blocking(_) => next.get.map(_.toOption)
-        })
+        logger.debug("Accessing cache while in Syncing(Some()) state") >>
+          (settings.coldReadPolicy match {
+            case ColdReadPolicy.Reactive    => IO.fromTry(current.v).map(_.some)
+            case ColdReadPolicy.Blocking(_) => next.get.map(_.toOption)
+          })
       case Value(_, v) => IO.fromEither(v.toEither.left.map(ReadSourceFailure)).map(_.some)
     }
 

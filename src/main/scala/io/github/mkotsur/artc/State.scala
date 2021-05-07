@@ -20,7 +20,6 @@ object State {
     */
   case class Syncing[A](
     round: SyncRound,
-    skips: Int,
     current: Option[Value[A]],
     nextDfrd: TryableDeferred[IO, Try[A]]
   ) extends State[A]

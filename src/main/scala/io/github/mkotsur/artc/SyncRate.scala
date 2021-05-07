@@ -8,10 +8,7 @@ object SyncRate {
 
   private[artc] def backoffInterval(settings: Settings)(a: SyncRound) =
     math
-      .min(
-        math.pow(2, a.value).toLong * 1000,
-        settings.ceilingInterval.toMillis
-      )
+      .min(math.pow(2, a.value).toLong * settings.msFactor, settings.ceilingInterval.toMillis)
       .millis
 
 }

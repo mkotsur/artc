@@ -33,7 +33,7 @@ lazy val `artc` =
     releasePublishArtifactsAction := PgpKeys.publishSigned.value,
     publishTo := Some(
       if (isSnapshot.value)
-        Opts.resolver.sbtIvySnapshots
+        Opts.resolver.sonatypeSnapshots
       else
         Opts.resolver.sonatypeStaging
     )

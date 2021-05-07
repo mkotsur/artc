@@ -16,8 +16,11 @@ object Cache {
 
   private val logger = Slf4jLogger.getLogger[IO]
 
-  object Settings {}
-  case class Settings(ceilingInterval: FiniteDuration, coldReadPolicy: ColdReadPolicy)
+  case class Settings(
+    ceilingInterval: FiniteDuration,
+    msFactor: Int = 1000,
+    coldReadPolicy: ColdReadPolicy = ColdReadPolicy.Reactive
+  )
 
   /**
     * Creates an instance of [[Cache]]
@@ -35,7 +38,7 @@ object Cache {
           case Init(updateDeferred: TryableDeferred[IO, Try[T]]) =>
             logger.debug("... from Init state") *>
               (for {
-                _ <- stateRef.set(Syncing(SyncRound.zero, 0, None, updateDeferred))
+                _ <- stateRef.set(Syncing(SyncRound.zero, None, updateDeferred))
                 valueEither <- fetchValue.attempt
                 _ <- updateDeferred.complete(valueEither.toTry)
                 _ <- stateRef.update(_ => Value(SyncRound.zero, valueEither.toTry))
@@ -47,7 +50,7 @@ object Cache {
               (for {
                 updateDeferred <- Deferred.tryable[IO, Try[T]]
                 _ <- stateRef.set(
-                  Syncing[T](round.next, 0, Value(round, storedValue).some, updateDeferred)
+                  Syncing[T](round.next, Value(round, storedValue).some, updateDeferred)
                 )
                 fetchedValueEither <- fetchValue.attempt
                 _ <- updateDeferred.complete(fetchedValueEither.toTry)
@@ -62,8 +65,9 @@ object Cache {
                       }
                     )
                 )
-                _ <- logger.debug("Set new value")
-                _ <- timer.sleep(backoffInterval(settings)(round.next)) *> cacheUpdateIO(stateRef)
+                sleepInterval = backoffInterval(settings)(round.next)
+                _ <- logger.debug(s"Set new value and schedule update after $sleepInterval")
+                _ <- timer.sleep(sleepInterval) *> cacheUpdateIO(stateRef)
               } yield ())
           case _: Syncing[T] =>
             logger.debug("Skipping a new update, because there is one in progress...")
@@ -75,41 +79,47 @@ object Cache {
       initState = Init(updateDeferred)
       initStateRef <- Resource.liftF(Ref.of[IO, State[T]](initState))
       _ <- Resource.make(cacheUpdateIO(initStateRef).start)(fiber => fiber.cancel)
-    } yield new Cache(initStateRef, settings, fetchValue)
+    } yield new Cache(initStateRef, settings)
   }
 
 }
 
-final class Cache[T] private (stateRef: Ref[IO, State[T]], settings: Settings, fetch: IO[T])(
-  implicit cs: ContextShift[IO]
+final class Cache[T] private (stateRef: Ref[IO, State[T]], settings: Settings)(implicit
+  cs: ContextShift[IO]
 ) {
 
   def latest: IO[Option[T]] =
-    stateRef.get.flatMap {
-      case Init(firstValDeferred) =>
-        logger.debug("Accessing cache while in Init state") >> (settings.coldReadPolicy match {
-          case ColdReadPolicy.Reactive => None.pure[IO]
-          case ColdReadPolicy.Blocking(_) =>
-            firstValDeferred.get.flatMap(
-              t => IO.fromEither(t.map(_.some).toEither.left.map(ReadSourceFailure))
-            )
-        })
-      case Syncing(round, skips, None, next) =>
-        logger.debug("Accessing cache while in Syncing(None) state") >>
-          (settings.coldReadPolicy match {
+    logger.debug("Accessing latest value") >> stateRef
+      .updateAndGet {
+        case s: Syncing[T] => s.copy(round = SyncRound.zero)
+        case s: Value[T]   => s.copy(round = SyncRound.zero)
+        case s             => s
+      }
+      .flatMap {
+        case Init(firstValDeferred) =>
+          logger.debug("Accessing cache while in Init state") >> (settings.coldReadPolicy match {
             case ColdReadPolicy.Reactive => None.pure[IO]
             case ColdReadPolicy.Blocking(_) =>
-              next.get
-                .flatMap(t => IO.fromEither(t.toEither.left.map(ReadSourceFailure)))
-                .map(_.some)
+              firstValDeferred.get.flatMap(
+                t => IO.fromEither(t.map(_.some).toEither.left.map(ReadSourceFailure))
+              )
           })
-      case Syncing(round, skips, Some(current), next) =>
-        logger.debug("Accessing cache while in Syncing(Some()) state") >>
-          (settings.coldReadPolicy match {
-            case ColdReadPolicy.Reactive    => IO.fromTry(current.v).map(_.some)
-            case ColdReadPolicy.Blocking(_) => next.get.map(_.toOption)
-          })
-      case Value(_, v) => IO.fromEither(v.toEither.left.map(ReadSourceFailure)).map(_.some)
-    }
+        case Syncing(_, None, next) =>
+          logger.debug("Accessing cache while in Syncing(None) state") >>
+            (settings.coldReadPolicy match {
+              case ColdReadPolicy.Reactive => None.pure[IO]
+              case ColdReadPolicy.Blocking(_) =>
+                next.get
+                  .flatMap(t => IO.fromEither(t.toEither.left.map(ReadSourceFailure)))
+                  .map(_.some)
+            })
+        case Syncing(_, Some(current), next) =>
+          logger.debug("Accessing cache while in Syncing(Some()) state") >>
+            (settings.coldReadPolicy match {
+              case ColdReadPolicy.Reactive    => IO.fromTry(current.v).map(_.some)
+              case ColdReadPolicy.Blocking(_) => next.get.map(_.toOption)
+            })
+        case Value(_, v) => IO.fromEither(v.toEither.left.map(ReadSourceFailure)).map(_.some)
+      }
 
 }

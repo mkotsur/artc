@@ -3,6 +3,7 @@ package io.github.mkotsur.artc
 import cats.effect.{ContextShift, IO}
 import cats.effect.concurrent.{Deferred, Ref, TryableDeferred}
 
+import java.time.LocalDateTime
 import scala.util.Try
 
 sealed trait State[+T]
@@ -20,7 +21,7 @@ object State {
     */
   case class Syncing[A](
     round: SyncRound,
-    current: Option[Value[A]],
+    current: Option[Try[A]],
     nextDfrd: TryableDeferred[IO, Try[A]]
   ) extends State[A]
 
@@ -28,6 +29,6 @@ object State {
     * The cache contains a value from the previous update, and there is no
     * in progress sync happening.
     */
-  case class Value[A](round: SyncRound, v: Try[A]) extends State[A]
+  case class Synced[A](round: SyncRound, v: Try[A], nextUpdate: LocalDateTime) extends State[A]
 
 }

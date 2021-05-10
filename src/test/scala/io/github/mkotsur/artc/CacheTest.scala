@@ -24,7 +24,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
   describe("ART cache") {
     describe("(With blocking cold read policy)") {
       val settings =
-        Cache.Settings(100 millis, 1000, ColdReadPolicy.Blocking(1 second))
+        Cache.Settings(5000 millis, 1000, 100 millis, ColdReadPolicy.Blocking(1 second))
       it("blocks and returns the first value") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)
 
@@ -54,7 +54,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
           .assertThrows[ReadSourceFailure]
       }
 
-      it("returns a failure when fetch fails immediatelly") {
+      it("returns a failure when fetch fails immediately") {
         val fetchValue = IO.raiseError[Int](new RuntimeException("Oops"))
 
         Cache
@@ -68,7 +68,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
     describe("(With reactive cold read policy)") {
       val settings =
-        Cache.Settings(100 millis, 1000, ColdReadPolicy.Reactive)
+        Cache.Settings(100 millis, 1000, 100 millis, ColdReadPolicy.Reactive)
 
       it("returns the zero element when no updates have been done") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)

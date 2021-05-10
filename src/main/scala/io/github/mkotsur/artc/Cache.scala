@@ -8,6 +8,7 @@ import io.github.mkotsur.artc.Cache._
 import io.github.mkotsur.artc.State.{Init, Synced, Syncing}
 import io.github.mkotsur.artc.SyncRate.backoffInterval
 import io.github.mkotsur.artc.config.ColdReadPolicy
+
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import java.time.LocalDateTime
@@ -38,7 +39,7 @@ object Cache {
       IO {
         LocalDateTime
           .now()
-          .plus(backoffInterval(settings)(SyncRound.zero).toMillis, ChronoUnit.MILLIS)
+          .plus(backoffInterval(settings)(round).toMillis, ChronoUnit.MILLIS)
       }
 
     def cacheUpdateIO(stateRef: Ref[IO, State[T]]): IO[Unit] =
@@ -54,11 +55,12 @@ object Cache {
                 _ <- updateDeferred.complete(valueEither.toTry)
                 nextUpdateAt <- nextUpdateAt(SyncRound.zero)
                 _ <- stateRef.update(_ => Synced(SyncRound.zero, valueEither.toTry, nextUpdateAt))
-                _ <-
-                  timer.sleep(backoffInterval(settings)(SyncRound.zero)) *> cacheUpdateIO(stateRef)
               } yield ())
-          case Synced(round, storedValue: Try[T], _) =>
-            logger.debug("... from Synced state") *>
+          case Synced(round, storedValue: Try[T], nextUpdate)
+              if LocalDateTime.now().isAfter(nextUpdate) =>
+            logger.debug(
+              s"... from Synced state because ${LocalDateTime.now()} is after ${nextUpdate}"
+            ) *>
               (for {
                 updateDeferred <- Deferred.tryable[IO, Try[T]]
                 _ <- stateRef.set(Syncing[T](round.next, storedValue.some, updateDeferred))
@@ -77,20 +79,27 @@ object Cache {
                       nextUpdateAt
                     )
                 )
-                sleepInterval = backoffInterval(settings)(round.next)
-                _ <- logger.debug(s"Set new value and schedule update after $sleepInterval")
-                _ <- timer.sleep(sleepInterval) *> cacheUpdateIO(stateRef)
+                _ <- logger.debug(s"Set new value and schedule update at $nextUpdateAt")
               } yield ())
+          case Synced(_, _, nextUpdate) =>
+            logger.debug(
+              s"Skipping as there is still ${nextUpdate.compareTo(LocalDateTime.now())} left until the new update"
+            )
           case _: Syncing[T] =>
             logger.debug("Skipping a new update, because there is one in progress...")
         }
       } yield ()
 
+    def scheduleCacheUpdate(ref: Ref[IO, State[T]]): IO[Unit] =
+      logger.info("Start updates") >> cacheUpdateIO(ref) >> timer.sleep(
+        settings.tickInterval
+      ) >> scheduleCacheUpdate(ref)
+
     for {
       updateDeferred <- Resource.liftF(Deferred.tryable[IO, Try[T]])
       initState = Init(updateDeferred)
       initStateRef <- Resource.liftF(Ref.of[IO, State[T]](initState))
-      _ <- Resource.make(cacheUpdateIO(initStateRef).start)(fiber => fiber.cancel)
+      _ <- Resource.make(scheduleCacheUpdate(initStateRef).start)(_.cancel)
     } yield new Cache(initStateRef, settings)
   }
 

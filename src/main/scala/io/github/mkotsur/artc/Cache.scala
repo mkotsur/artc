@@ -12,8 +12,7 @@ import io.github.mkotsur.artc.config.ColdReadPolicy
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import java.time.LocalDateTime
-import java.time.temporal.{ChronoUnit}
-import scala.concurrent.duration.FiniteDuration
+import java.time.temporal.ChronoUnit
 import scala.util.{Failure, Success, Try}
 
 object Cache {

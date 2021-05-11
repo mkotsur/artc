@@ -6,7 +6,7 @@ import cats.implicits._
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import io.github.mkotsur.artc.Cache._
 import io.github.mkotsur.artc.State.{Init, Synced, Syncing}
-import io.github.mkotsur.artc.SyncRate.backoffInterval
+import io.github.mkotsur.artc.SyncRate.{backoffInterval, nextUpdateAt}
 import io.github.mkotsur.artc.config.ColdReadPolicy
 
 import scala.concurrent.duration._
@@ -51,13 +51,6 @@ object Cache {
     timer: Timer[IO]
   ): Resource[IO, Cache[T]] = {
 
-    def nextUpdateAt(round: SyncRound): IO[LocalDateTime] =
-      IO {
-        LocalDateTime
-          .now()
-          .plus(backoffInterval(settings)(round).toMillis, ChronoUnit.MILLIS)
-      }
-
     def cacheUpdateIO(stateRef: Ref[IO, State[T]]): IO[Unit] =
       for {
         _ <- logger.debug("Cache update started")
@@ -69,7 +62,7 @@ object Cache {
                 _ <- stateRef.set(Syncing(SyncRound.zero, None, updateDeferred))
                 valueEither <- fetchValue.attempt
                 _ <- updateDeferred.complete(valueEither.toTry)
-                nextUpdateAt <- nextUpdateAt(SyncRound.zero)
+                nextUpdateAt <- nextUpdateAt(settings, SyncRound.zero)
                 _ <- stateRef.update(_ => Synced(SyncRound.zero, valueEither.toTry, nextUpdateAt))
               } yield ())
           case Synced(round, storedValue: Try[T], nextUpdate)
@@ -83,7 +76,7 @@ object Cache {
                 fetchedValueEither <- fetchValue.attempt
                 _ <- updateDeferred.complete(fetchedValueEither.toTry)
                 _ <- logger.debug("Preparing to set new value")
-                nextUpdateAt <- nextUpdateAt(round.next)
+                nextUpdateAt <- nextUpdateAt(settings, round.next)
                 _ <- stateRef.update(
                   _ =>
                     Synced(
@@ -97,7 +90,7 @@ object Cache {
                 )
                 _ <- logger.debug(s"Set new value and schedule update at $nextUpdateAt")
               } yield ())
-          case Synced(_, _, nextUpdate) =>
+          case Synced(_, _, _) =>
             logger.trace(s"Skipping as it is not the right time yet.")
           case _: Syncing[T] =>
             logger.debug("Skipping a new update, because there is one in progress...")

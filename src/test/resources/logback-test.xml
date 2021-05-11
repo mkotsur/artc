@@ -6,7 +6,7 @@
         </encoder>
     </appender>
 
-    <logger name="io.github.mkotsur.cache" level="error" additivity="false">
+    <logger name="io.github.mkotsur.artc" level="debug" additivity="false">
         <appender-ref ref="STDOUT" />
     </logger>
 

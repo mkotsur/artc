@@ -5,11 +5,11 @@ ThisBuild / name := "artc"
 
 ThisBuild / scalaVersion := "2.13.1"
 
-ThisBuild / libraryDependencies += "org.typelevel" %% "cats-effect" % "2.1.3"
+ThisBuild / libraryDependencies += "org.typelevel" %% "cats-effect" % "2.2.0"
 ThisBuild / libraryDependencies += "io.chrisdavenport" %% "log4cats-slf4j" % "1.0.1"
 ThisBuild / libraryDependencies += "org.scalatest" %% "scalatest" % "3.1.1" % "test"
 ThisBuild / libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.2.3" % "test"
-ThisBuild / libraryDependencies += "com.codecommit" %% "cats-effect-testing-scalatest" % "0.4.0" % "test"
+ThisBuild / libraryDependencies += "com.codecommit" %% "cats-effect-testing-scalatest" % "0.4.1" % "test"
 
 import ReleaseTransformations._
 
@@ -33,7 +33,7 @@ lazy val `artc` =
     releasePublishArtifactsAction := PgpKeys.publishSigned.value,
     publishTo := Some(
       if (isSnapshot.value)
-        Opts.resolver.sbtIvySnapshots
+        Opts.resolver.sonatypeSnapshots
       else
         Opts.resolver.sonatypeStaging
     )

@@ -6,7 +6,6 @@ import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.implicits._
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import io.github.mkotsur.artc.config.ColdReadPolicy
-import org.scalatest.exceptions.TestFailedException
 import org.scalatest.funspec.AsyncFunSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -15,7 +14,6 @@ import scala.collection._
 import scala.concurrent.Promise
 import scala.concurrent.duration._
 import scala.language.postfixOps
-import scala.util.Try
 
 class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
@@ -24,7 +22,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
   describe("ART cache") {
     describe("(With blocking cold read policy)") {
       val settings =
-        Cache.Settings(5000 millis, 1000, 100 millis, ColdReadPolicy.Blocking(1 second))
+        Cache.Settings(5000 millis, 1 second, 100 millis, ColdReadPolicy.Blocking(1 second))
       it("blocks and returns the first value") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)
 
@@ -68,7 +66,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
     describe("(With reactive cold read policy)") {
       val settings =
-        Cache.Settings(100 millis, 1000, 100 millis, ColdReadPolicy.Reactive)
+        Cache.Settings(100 millis, 1 second, 100 millis, ColdReadPolicy.Reactive)
 
       it("returns the zero element when no updates have been done") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)
@@ -175,7 +173,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
           new Date().getTime
         }
 
-        val theSettings = settings.copy(ceilingInterval = 5 seconds, delayFactor = 100)
+        val theSettings = settings.copy(ceilingInterval = 5 seconds, delayFactor = 100 millis)
         Cache
           .create(theSettings, fetchValue)
           .use { cache =>
@@ -186,14 +184,14 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
               _ <- IO(firstAccessMillis - testStartMillis)
-                .asserting(_ should be <= theSettings.delayFactor.toLong)
+                .asserting(_ should be <= theSettings.delayFactor.toMillis)
               _ <- IO.sleep(theSettings.ceilingInterval * 3)
               secondAccessMillis <- cache.latest.flatMap {
                 case None                    => IO.raiseError(new RuntimeException("Value should have been available"))
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
               _ <- IO(new Date().getTime - secondAccessMillis)
-                .asserting(_ should be > theSettings.delayFactor.toLong)
+                .asserting(_ should be > theSettings.delayFactor.toMillis)
             } yield ()
           }
           .assertNoException
@@ -201,7 +199,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
       it("should reset update interval") {
 
-        val theSettings = settings.copy(ceilingInterval = 2 seconds, delayFactor = 100)
+        val theSettings = settings.copy(ceilingInterval = 2 seconds, delayFactor = 100 millis)
         Ref
           .of[IO, List[Long]](Nil)
           .flatMap(allUpdatesRef => {
@@ -231,7 +229,6 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
                           updateDeltas.filter(_ < 0)
                         }
                         .asserting(_ should not be empty)
-                    _ <- IO(println("Done"))
                   } yield ()
               }
               .assertNoException

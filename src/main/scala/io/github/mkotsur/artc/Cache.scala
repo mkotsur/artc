@@ -12,7 +12,7 @@ import io.github.mkotsur.artc.config.ColdReadPolicy
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import java.time.LocalDateTime
-import java.time.temporal.{ChronoUnit, TemporalUnit}
+import java.time.temporal.{ChronoUnit}
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
 
@@ -21,8 +21,25 @@ object Cache {
   private val logger = Slf4jLogger.getLogger[IO]
 
   case class Settings(
+    /**
+      * This value puts a cap on the exponential growth of the
+      * refresh interval between the rounds.
+      */
     ceilingInterval: FiniteDuration,
-    msFactor: Int = 1000,
+    /**
+      * This factor indicates how long to wait after round 0,
+      * and is subsequently used as a multiplier for `2^round`.
+      * E.g.:
+      * Round: 0; Refresh interval: `delayFactor`;
+      * Round: 1; Refresh interval: `2 * delayFactor`;
+      * Round: 2; Refresh interval: `4 * delayFactor`;
+      * Round: 3; Refresh interval: `8 * delayFactor`, and so on.
+      */
+    delayFactor: FiniteDuration = 1 second,
+    /**
+      * How often will the cache check if the update needs to occur.
+      * This value should never be larger than delayFactor.
+      */
     tickInterval: FiniteDuration = 100 millis,
     coldReadPolicy: ColdReadPolicy = ColdReadPolicy.Reactive
   )
@@ -82,18 +99,14 @@ object Cache {
                 _ <- logger.debug(s"Set new value and schedule update at $nextUpdateAt")
               } yield ())
           case Synced(_, _, nextUpdate) =>
-            logger.debug(
-              s"Skipping as there is still ${nextUpdate.compareTo(LocalDateTime.now())} left until the new update"
-            )
+            logger.trace(s"Skipping as it is not the right time yet.")
           case _: Syncing[T] =>
             logger.debug("Skipping a new update, because there is one in progress...")
         }
       } yield ()
 
     def scheduleCacheUpdate(ref: Ref[IO, State[T]]): IO[Unit] =
-      logger.info("Start updates") >> cacheUpdateIO(ref) >> timer.sleep(
-        settings.tickInterval
-      ) >> scheduleCacheUpdate(ref)
+      cacheUpdateIO(ref) >> timer.sleep(settings.tickInterval) >> scheduleCacheUpdate(ref)
 
     for {
       updateDeferred <- Resource.liftF(Deferred.tryable[IO, Try[T]])

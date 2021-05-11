@@ -175,7 +175,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
           new Date().getTime
         }
 
-        val theSettings = settings.copy(ceilingInterval = 5 seconds, msFactor = 100)
+        val theSettings = settings.copy(ceilingInterval = 5 seconds, delayFactor = 100)
         Cache
           .create(theSettings, fetchValue)
           .use { cache =>
@@ -186,14 +186,14 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
               _ <- IO(firstAccessMillis - testStartMillis)
-                .asserting(_ should be <= theSettings.msFactor.toLong)
+                .asserting(_ should be <= theSettings.delayFactor.toLong)
               _ <- IO.sleep(theSettings.ceilingInterval * 3)
               secondAccessMillis <- cache.latest.flatMap {
                 case None                    => IO.raiseError(new RuntimeException("Value should have been available"))
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
               _ <- IO(new Date().getTime - secondAccessMillis)
-                .asserting(_ should be > theSettings.msFactor.toLong)
+                .asserting(_ should be > theSettings.delayFactor.toLong)
             } yield ()
           }
           .assertNoException
@@ -201,7 +201,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
       it("should reset update interval") {
 
-        val theSettings = settings.copy(ceilingInterval = 2 seconds, msFactor = 100)
+        val theSettings = settings.copy(ceilingInterval = 2 seconds, delayFactor = 100)
         Ref
           .of[IO, List[Long]](Nil)
           .flatMap(allUpdatesRef => {

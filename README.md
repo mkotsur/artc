@@ -9,7 +9,7 @@ Sometimes you need to integrate with slow services. This is rarely a pleasant pr
 * Non-blocking read-through;
 * Active content synchronization;
 * Automatic refresh rate adjustment;
-* Use it as a library or REST microservice.
+* Use it as a library or a REST microservice (soon).
 
 
 <img src="/docs/artc.png" alt="How Artc works" width="640" />
@@ -20,18 +20,20 @@ Sometimes you need to integrate with slow services. This is rarely a pleasant pr
 import io.github.mkotsur.artc.Cache
 import cats.effect.{ExitCode, IO, IOApp}
 
+// 1. Configure
 case class User(name: String)
 
 val settings: Cache.Settings  = ???
 val readSource: IO[List[User]] = ???
 
+// 2. Create as resource
+val cacheR: Resource[IO, Cache[List[User]]] = 
+  Cache.create(settings, readSource)
+
+// 3. Use
 for {
-  cache <- Cache.create(settings, readSource)
-  updateSharesFiber <- cache.scheduleUpdates.start
-  _ <- {
-    // Your logic goes here 
-     cache.latest.flatMap(v => IO(println(v)))
-    }   
+  latest <- cacheR.use(cache => cache.latest)
+  _ <- IO(println(v))   
   _ <- updateSharesFiber.join
 } yield ExitCode.Success
 ```

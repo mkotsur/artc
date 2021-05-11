@@ -2,10 +2,10 @@
 
 Artc (pronounced art·sy) is an Active Read-Through Cache for cats-effect programs. Its primary goal is to allow developers to write as little code as possible to solve a common problem of reading data from services with high latency.
 
-### Motivation
+## Motivation
 Sometimes you need to integrate with slow services. This is rarely a pleasant problem to solve, but it doesn't have to take weeks to solve and destroy your development experience. Artc is here to help! 
 
-### Main features:
+## Main features:
 * Non-blocking read-through;
 * Active content synchronization;
 * Automatic refresh rate adjustment;

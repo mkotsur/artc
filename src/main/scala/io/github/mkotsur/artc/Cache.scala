@@ -12,7 +12,6 @@ import io.github.mkotsur.artc.config.ColdReadPolicy
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import java.time.LocalDateTime
-import java.time.temporal.ChronoUnit
 import scala.util.{Failure, Success, Try}
 
 object Cache {
@@ -82,8 +81,12 @@ object Cache {
                     Synced(
                       round.next,
                       (fetchedValueEither.toTry, storedValue) match {
-                        case (Failure(_), Success(_)) => storedValue
-                        case _                        => fetchedValueEither.toTry
+                        case (Failure(error), Success(_)) =>
+                          logger.error(error)(
+                            "There was an error fetching a fresh value, so keeping the old successful value in the cache."
+                          )
+                          storedValue
+                        case _ => fetchedValueEither.toTry
                       },
                       nextUpdateAt
                     )

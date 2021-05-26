@@ -12,6 +12,7 @@ import io.github.mkotsur.artc.config.ColdReadPolicy
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 import scala.util.{Failure, Success, Try}
 
 object Cache {
@@ -39,7 +40,8 @@ object Cache {
       * This value should never be larger than delayFactor.
       */
     tickInterval: FiniteDuration = 100 millis,
-    coldReadPolicy: ColdReadPolicy = ColdReadPolicy.Reactive
+    coldReadPolicy: ColdReadPolicy = ColdReadPolicy.Reactive,
+    label: Option[String] = None
   )
 
   /**
@@ -52,7 +54,7 @@ object Cache {
 
     def cacheUpdateIO(stateRef: Ref[IO, State[T]]): IO[Unit] =
       for {
-        _ <- logger.debug("Cache update started")
+        _ <- logger.trace("Cache tick")
         state <- stateRef.get
         _ <- state match {
           case Init(updateDeferred: TryableDeferred[IO, Try[T]]) =>
@@ -66,15 +68,14 @@ object Cache {
               } yield ())
           case Synced(round, storedValue: Try[T], nextUpdate)
               if LocalDateTime.now().isAfter(nextUpdate) =>
-            logger.debug(
-              s"... from Synced state because ${LocalDateTime.now()} is after ${nextUpdate}"
+            logger.trace(
+              s"... from Synced state because update is ${nextUpdate.until(LocalDateTime.now(), ChronoUnit.MILLIS)}ms overdue"
             ) *>
               (for {
                 updateDeferred <- Deferred.tryable[IO, Try[T]]
                 _ <- stateRef.set(Syncing[T](round.next, storedValue.some, updateDeferred))
                 fetchedValueEither <- fetchValue.attempt
                 _ <- updateDeferred.complete(fetchedValueEither.toTry)
-                _ <- logger.debug("Preparing to set new value")
                 nextUpdateAt <- nextUpdateAt(settings, round.next)
                 _ <- stateRef.update(
                   _ =>
@@ -91,7 +92,9 @@ object Cache {
                       nextUpdateAt
                     )
                 )
-                _ <- logger.debug(s"Set new value and schedule update at $nextUpdateAt")
+                _ <- logger.debug(
+                  s"Set new value and schedule update in ${LocalDateTime.now().until(nextUpdateAt, ChronoUnit.SECONDS)}s."
+                )
               } yield ())
           case Synced(_, _, _) =>
             logger.trace(s"Skipping as it is not the right time yet.")
@@ -121,7 +124,7 @@ final class Cache[T] private (stateRef: Ref[IO, State[T]], settings: Settings)(i
     logger.debug("Accessing latest value") >> stateRef
       .updateAndGet {
         case s: Syncing[T] => s.copy(round = SyncRound.zero)
-        case s: Synced[T]  => s.copy(round = SyncRound.zero)
+        case s: Synced[T]  => s.copy(round = SyncRound.zero, nextUpdate = LocalDateTime.now())
         case s             => s
       }
       .flatMap {

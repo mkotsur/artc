@@ -1,6 +1,6 @@
 package io.github.mkotsur.artc
 
-import cats.effect.IO
+import cats.effect.{Clock, IO, Resource}
 import cats.effect.concurrent.Ref
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.implicits._
@@ -18,6 +18,8 @@ import scala.language.postfixOps
 class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
   private val logger = Slf4jLogger.getLogger[IO]
+
+  private val clock = implicitly[Clock[IO]]
 
   describe("ART cache") {
     describe("(With blocking cold read policy)") {
@@ -66,7 +68,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
     describe("(With reactive cold read policy)") {
       val settings =
-        Cache.Settings(100 millis, 1 second, 100 millis, ColdReadPolicy.Reactive)
+        Cache.Settings(500 millis, 100 millis, 10 millis, ColdReadPolicy.Reactive)
 
       it("returns the zero element when no updates have been done") {
         val readSource = IO.sleep(1 second) >> IO.pure(42)
@@ -97,7 +99,7 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
         Cache
           .create(settings, fetchValue)
           .use { cache =>
-            IO.sleep(300 millis) >> cache.latest
+            cache.latest.delayBy(300 millis)
           }
           .asserting(_.get should be >= 2)
       }
@@ -109,12 +111,12 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
         Cache
           .create(settings, fetchValue)
           .use { cache =>
-            (IO.sleep(300 millis) >> cache.latest).assertThrows[ReadSourceFailure]
+            cache.latest.delayBy(300 millis)
           }
-          .assertNoException
+          .assertThrows[ReadSourceFailure]
       }
 
-      it("returns a failure when a subsequent update action fails") {
+      it("returns the latest success value when a subsequent update action fails") {
         val successReadLatchP = Promise[Unit]
         val fetchValue = IO {
           if (!successReadLatchP.isCompleted) {
@@ -128,10 +130,10 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
           .create(settings, fetchValue)
           .use { cache =>
             for {
-              _ <- IO.sleep(300 millis)
+              _ <- IO.sleep(settings.delayFactor)
               _ <- cache.latest.asserting(_ shouldEqual 42.some)
               _ <- IO(successReadLatchP.success(())) // Move to next state
-              _ <- IO.sleep(300 millis)
+              _ <- IO.sleep(settings.ceilingInterval) // Wait for a new refresh
               _ <- cache.latest.asserting(_ shouldEqual 42.some)
             } yield ()
           }
@@ -146,9 +148,9 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
             if (!firstCompleted) {
               IO(println("Return 42")) *> IO(firstReadLatchP.success()) *> IO.pure(42)
             } else {
-              IO(println("Blocking forever")) *> IO.never *> IO(
-                println("This should never happen")
-              ) *> IO.never
+              IO(println("Blocking forever")) *> IO.never.flatTap(
+                (_: Nothing) => IO.raiseError(new RuntimeException("This should never happen"))
+              )
             }
         } yield v
 
@@ -169,16 +171,16 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
       }
 
       it("should increase update interval") {
-        val fetchValue = IO {
-          new Date().getTime
-        }
+
+        val fetchValue = clock.realTime(MILLISECONDS)
 
         val theSettings = settings.copy(ceilingInterval = 5 seconds, delayFactor = 100 millis)
         Cache
           .create(theSettings, fetchValue)
           .use { cache =>
             for {
-              testStartMillis <- fetchValue // get millis without cache
+              testStartMillis <- clock.realTime(MILLISECONDS)
+              _ <- IO.sleep(settings.delayFactor)
               firstAccessMillis <- cache.latest.flatMap { // access first time
                 case None                    => IO.raiseError(new RuntimeException("Value should have been available"))
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
@@ -199,23 +201,22 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
 
       it("should reset update interval") {
 
-        val theSettings = settings.copy(ceilingInterval = 2 seconds, delayFactor = 100 millis)
-        Ref
-          .of[IO, List[Long]](Nil)
-          .flatMap(allUpdatesRef => {
-            val fetchValue = allUpdatesRef.update(_ :+ new Date().getTime)
+        val theSettings = settings.copy(ceilingInterval = 1 minute, delayFactor = 3 seconds)
 
+        for {
+          allUpdatesRef <- Ref.of[IO, List[Long]](Nil)
+          _ <-
             Cache
-              .create(theSettings, fetchValue)
-              .use {
+              .create(
+                theSettings,
+                clock.realTime(MILLISECONDS).flatTap(ms => allUpdatesRef.update(_ :+ ms))
+              )
+              .use(
                 cache =>
                   for {
-                    _ <-
-                      IO.sleep(
-                        theSettings.ceilingInterval
-                      ) // at least 2 updates should have happened
+                    _ <- IO.sleep(theSettings.delayFactor * 4) // at least 2 updates
                     _ <- cache.latest
-                    _ <- IO.sleep(3 seconds)
+                    _ <- IO.sleep(theSettings.delayFactor * 2)
                     _ <-
                       allUpdatesRef.get
                         .map { updateTimestamps =>
@@ -223,16 +224,14 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
                             case vals @ _ :: vv =>
                               vv.zip(vals).map { case (prev, next) => prev - next }
                           }
-
                           val updateIntervals = d(updateTimestamps)
                           val updateDeltas = d(updateIntervals)
                           updateDeltas.filter(_ < 0)
                         }
                         .asserting(_ should not be empty)
                   } yield ()
-              }
-              .assertNoException
-          })
+              )
+        } yield ()
       }
     }
   }

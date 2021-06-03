@@ -86,6 +86,7 @@ object Cache {
                 fetchedValueEither <- attemptFetch
                 _ <- updateDeferred.complete(fetchedValueEither.toTry)
                 nextUpdateAt <- nextUpdateAt(settings, round.next)
+                _ <- logger.debug(s"Updating internal state of $cacheLabel. Round ${round.next}")
                 _ <- stateRef.update(
                   _ =>
                     Synced(

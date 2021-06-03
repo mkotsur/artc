@@ -9,13 +9,17 @@ import scala.concurrent.duration._
 
 object SyncRate {
 
-  private[artc] def backoffInterval(settings: Settings)(a: SyncRound) =
-    math
+  private[artc] def backoffInterval(settings: Settings)(a: SyncRound) = {
+    val maxRound =
+      Math.floor(Math.log(settings.ceilingInterval / settings.delayFactor) / Math.log(2)) + 1
+    val power = Math.min(maxRound, a.value)
+    val l = math
       .min(
-        math.pow(2, a.value).toLong * settings.delayFactor.toMillis,
+        math.pow(2, power).toLong * settings.delayFactor.toMillis,
         settings.ceilingInterval.toMillis
       )
-      .millis
+    l.millis
+  }
 
   private[artc] def nextUpdateAt(settings: Settings, round: SyncRound): IO[LocalDateTime] =
     IO {

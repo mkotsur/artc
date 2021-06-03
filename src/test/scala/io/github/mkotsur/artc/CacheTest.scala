@@ -186,14 +186,17 @@ class CacheTest extends AsyncFunSpec with AsyncIOSpec with Matchers {
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
               _ <- IO(firstAccessMillis - testStartMillis)
-                .asserting(_ should be <= theSettings.delayFactor.toMillis)
+                .asserting(_ should be <= theSettings.delayFactor.toMillis * 2)
               _ <- IO.sleep(theSettings.ceilingInterval * 3)
               secondAccessMillis <- cache.latest.flatMap {
                 case None                    => IO.raiseError(new RuntimeException("Value should have been available"))
                 case Some(firstAccessMillis) => firstAccessMillis.pure[IO]
               }
-              _ <- IO(new Date().getTime - secondAccessMillis)
-                .asserting(_ should be > theSettings.delayFactor.toMillis)
+              _ <-
+                clock
+                  .realTime(MILLISECONDS)
+                  .map(_ - secondAccessMillis)
+                  .asserting(_ should be > theSettings.delayFactor.toMillis)
             } yield ()
           }
           .assertNoException
